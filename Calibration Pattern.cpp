@@ -52,7 +52,7 @@ void displayCalibrationWindow(Mat& img) {
     drawGrid(img, dot_radius, dot_spacing, grid_cols, grid_rows);
 
     // Выведите изображение на экран и дождитесь нажатия клавиши
-    imshow("Калибровка", img);
+    imshow("Calibration", img);
     waitKey(0);
 }
 
