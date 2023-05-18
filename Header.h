@@ -1,3 +1,5 @@
+#include <k4a/k4a.h>
+#include <k4a/k4a.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/core.hpp>
@@ -13,6 +15,8 @@
 #include <condition_variable>
 #include <opencv2/flann/matrix.h>
 #include <ctime>
+#include <k4a/k4a.h>
+#include <k4a/k4a.hpp>
 using namespace std;
 using namespace cv;
 

@@ -5,6 +5,87 @@
 // https://docs.opencv.org/4.x/index.html - оригинальная документация на английском
 
 
+k4a_image_t upscaleIR16Image(const k4a_image_t& ir16Image)
+{
+    // Get the dimensions of the input IR16 image
+    int width = k4a_image_get_width_pixels(ir16Image);
+    int height = k4a_image_get_height_pixels(ir16Image);
+
+    // Create a new image with the target resolution (720p) and custom16 format
+    k4a_image_t upscaledImage = nullptr;
+    k4a_image_create(K4A_IMAGE_FORMAT_CUSTOM16, 1280, 720, 1280 * static_cast<int>(sizeof(uint16_t)), &upscaledImage);
+
+    // Get the buffer containing the IR16 image data
+    uint16_t* ir16Data = reinterpret_cast<uint16_t*>(k4a_image_get_buffer(ir16Image));
+    uint16_t* upscaledData = reinterpret_cast<uint16_t*>(k4a_image_get_buffer(upscaledImage));
+
+    // Copy and upscale the IR16 image
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            uint16_t ir16Value = ir16Data[y * width + x];
+            upscaledData[y * 1280 + x] = ir16Value;
+        }
+    }
+
+    return upscaledImage;
+}
+
+k4a_image_t convertIR16ToCustom16(const k4a_image_t& ir16Image)
+{
+    // Get the dimensions of the input IR16 image
+    int width = k4a_image_get_width_pixels(ir16Image);
+    int height = k4a_image_get_height_pixels(ir16Image);
+
+    // Create a new image with the same resolution and custom16 format
+    k4a_image_t custom16Image = nullptr;
+    k4a_image_create(K4A_IMAGE_FORMAT_CUSTOM16, width, height, width * static_cast<int>(sizeof(uint16_t)), &custom16Image);
+
+    // Get the buffer containing the IR16 image data
+    uint16_t* ir16Data = reinterpret_cast<uint16_t*>(k4a_image_get_buffer(ir16Image));
+    uint16_t* custom16Data = reinterpret_cast<uint16_t*>(k4a_image_get_buffer(custom16Image));
+
+    // Copy the data from IR16 image to custom16 image
+    std::memcpy(custom16Data, ir16Data, width * height * sizeof(uint16_t));
+
+    return custom16Image;
+}
+
+
+k4a_image_t IR_to_color(k4a_transformation_t& transformation, k4a_image_t& depth_image, k4a_image_t& IR_image_raw, k4a_image_t& color_image)
+{
+    // Get attributes of the color image
+    uint32_t color_height = k4a_image_get_height_pixels(color_image);
+    uint32_t color_width = k4a_image_get_width_pixels(color_image);
+    uint32_t color_stride = k4a_image_get_stride_bytes(color_image);
+
+    // Upscale the IR image to match the color image resolution
+    k4a_image_t IR_image = convertIR16ToCustom16(IR_image_raw);
+
+    // Create blank image containers for transformed images
+    k4a_image_t transformed_IR_image = nullptr;
+    k4a_image_t transformed_depth_image = nullptr;
+    if (k4a_image_create(K4A_IMAGE_FORMAT_CUSTOM16, color_width, color_height, color_stride, &transformed_IR_image) != K4A_RESULT_SUCCEEDED)
+    {
+        printf("Failed to create blank IR image (IR_to_color)\n");
+    }
+    if (k4a_image_create(K4A_IMAGE_FORMAT_DEPTH16, color_width, color_height, color_stride, &transformed_depth_image) != K4A_RESULT_SUCCEEDED)
+    {
+        printf("Failed to create blank depth image (IR_to_color)\n");
+    }
+
+    // Apply the transformation
+    if (k4a_transformation_depth_image_to_color_camera_custom(transformation, depth_image, IR_image, transformed_depth_image,
+        transformed_IR_image, K4A_TRANSFORMATION_INTERPOLATION_TYPE_NEAREST, 0) != K4A_RESULT_SUCCEEDED)
+    {
+        printf("IR/depth transformation failed\n");
+    }
+    cout << "Вроде успех\n";
+    // Release the intermediate IR image
+    k4a_image_release(IR_image);
+    //k4a_image_release(transformed_depth_image);
+    return transformed_IR_image;
+}
+
 
 Mat computeOpticalFlow(Mat previous_frame, Mat current_frame) {
     // вычисляем параметры оптического потока
@@ -93,28 +174,38 @@ Point split_frame(vector<int>& hsv_set, Mat& previous_frame, Mat& current_frame,
     vector<vector<Point>> ans(numRows, vector<Point>(numCols));
     mutex control;
     vector<thread> t;
-    // делим картинку на numRows*numCols изображений и обрабатываем каждое в отдельном потоке
     for (int i = 0; i < numRows; i++) {
         for (int j = 0; j < numCols; j++) {
             int x = j * subImgWidth;
             int y = i * subImgHeight;
 
             auto roi = Rect(x, y, subImgWidth, subImgHeight);
+            // Extract the current sub-image
+            //cout << i << " " << j<<endl;
+            //cout << x << " " << y << " " << previous_frame.isContinuous() << " " << endl;
+            //cout << roi.width << " " << roi.height << endl;
             try {
                 Mat subImage_prev = previous_frame(roi).clone();
                 Mat subImage_current = current_frame(roi).clone();
+                //cout << subImage_prev.cols << " " << subImage_prev.rows << endl;
                 t.push_back(thread(procesing_frame, hsv_set, subImage_prev, subImage_current, ref(ans[i][j]), ref(control)));
             }
             catch (cv::Exception& e) {
                 cerr << "Reason: " << e.msg << endl;
+                // nothing more we can do
                 exit(1);
             }
+
+            // Create a thread to process the sub-image
+
+            // Detach the thread so that it runs independently
         }
     }
     for (auto& i : t) {
+        //unique_lock<mutex> ul(control);
         i.join();
+        //ul.unlock();
     }
-    // выбираем самую близкую точку к предыдущей
     Point answer = ans[0][0];
     for (int i = 0; i < numRows; i++) {
         for (int j = 0; j < numCols; j++) {
@@ -144,6 +235,34 @@ Point split_frame(vector<int>& hsv_set, Mat& previous_frame, Mat& current_frame,
 
 // типа главный
 int main(int argc, char** argv) {
+
+    k4a_device_t device;
+    k4a_device_open(K4A_DEVICE_DEFAULT, &device);
+
+    k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
+    config.color_format = K4A_IMAGE_FORMAT_COLOR_BGRA32;
+    config.color_resolution = K4A_COLOR_RESOLUTION_720P;
+    config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
+    config.camera_fps = K4A_FRAMES_PER_SECOND_30;
+    config.synchronized_images_only = true;
+    config.depth_delay_off_color_usec = 0;
+    config.subordinate_delay_off_master_usec = 0;
+    config.wired_sync_mode = K4A_WIRED_SYNC_MODE_STANDALONE;
+    
+
+
+    k4a_device_start_cameras(device, &config);
+
+    // Configure IR camera
+    k4a_calibration_t calibration;
+    k4a_device_get_calibration(device, config.depth_mode, K4A_COLOR_RESOLUTION_720P, &calibration);
+
+    k4a_calibration_camera_t camera = calibration.color_camera_calibration;
+    k4a_calibration_camera_t ir_camera = calibration.depth_camera_calibration;
+
+    
+
+
     // создаем окошки для вывода картинки с камеры и результатов работы
     auto const MASK_WINDOW = "Settings";
     auto const filename_hsv = "hsv_settings.txt";
@@ -153,22 +272,47 @@ int main(int argc, char** argv) {
 
     VideoCapture cap;
     // если что можно подсунуть видео через параметр запуска
+    
     if (argc <= 2) {
         cap.open(0);
     }
     else {
         cap.open(argv[2]);
     }
-    Mat frame;
+    
+    k4a_color_control_mode_t color_control_mode;
+    int32_t color_control_value;
+    k4a_result_t result = k4a_device_get_color_control(device, K4A_COLOR_CONTROL_EXPOSURE_TIME_ABSOLUTE, &color_control_mode, &color_control_value);
+    if (result == K4A_RESULT_SUCCEEDED)
+    {
+        // adjust exposure settings
+        int32_t new_exposure_value = color_control_value + 1100; // increase by 500 units
+        result = k4a_device_set_color_control(device, K4A_COLOR_CONTROL_EXPOSURE_TIME_ABSOLUTE, K4A_COLOR_CONTROL_MODE_MANUAL, new_exposure_value);
+    }
+    Mat frame = cv::Mat::zeros(ir_camera.resolution_height, ir_camera.resolution_width, CV_16U);
+    k4a_image_t ir_image;
     // загружаем координаты угловых точек, которые определяем через 2 программу
     auto cords = load_vector("settings.txt");
     Point previous = cords[0], next = cords[1];
     // обрабатываем кадры с камеры
     // читаем первый кадр т.к. он будет пустым
-    for(int i = 0; i < 10; i++)
-        cap >> frame;
-    cap >> frame;
+    k4a_capture_t capture;
+    k4a_capture_create(&capture);
+    for (int i = 0; i < 10; i++) {
+        k4a_wait_result_t result = k4a_device_get_capture(device, &capture, K4A_WAIT_INFINITE);
+        if (result == K4A_WAIT_RESULT_SUCCEEDED) {
+            ir_image = k4a_capture_get_ir_image(capture);
+            frame.data = reinterpret_cast<uchar*>(k4a_image_get_buffer(ir_image));
+            // Process the frame here...
+            k4a_capture_release(capture);
+        }
+        if (result != K4A_WAIT_RESULT_SUCCEEDED) {
+            printf("Failed to get capture: \n");
+        }
+    }
+    //frame.convertTo(frame, CV_8U, 255.0 / 65535.0);
     Mat gray_frame, current_frame;
+    cv::cvtColor(frame, frame, cv::COLOR_GRAY2BGR);
     // переводим из бгр в отенки серого
     cvtColor(frame, gray_frame, COLOR_BGR2GRAY);
 
@@ -187,66 +331,76 @@ int main(int argc, char** argv) {
     auto temp = load_vector_int(filename_hsv);
     if (temp.size() == 6) hsv_set = temp;
 
-    /*
-    // меняем параметры в реальном времени
-    if (argc >= 2 && argv[1][0] == 'O' && argv[1][1] == 'N') {
-        cout << "DEBUG MODE ON\n";
-        namedWindow("Example3", cv::WINDOW_AUTOSIZE);
-        namedWindow("Example4", cv::WINDOW_AUTOSIZE);
-        namedWindow("Example5", cv::WINDOW_AUTOSIZE);
-        cv::namedWindow(MASK_WINDOW, WINDOW_AUTOSIZE);
-        createTrackbar("h min", MASK_WINDOW, &hsv_set[0], 255);
-        createTrackbar("h max", MASK_WINDOW, &hsv_set[3], 255);
-        createTrackbar("s min", MASK_WINDOW, &hsv_set[1], 255);
-        createTrackbar("s max", MASK_WINDOW, &hsv_set[4], 255);
-        createTrackbar("v min", MASK_WINDOW, &hsv_set[2], 255);
-        createTrackbar("v max", MASK_WINDOW, &hsv_set[5], 255);
-    }
-    */
+    
+    int cnt_frame = 0;
+    Point mega_frame = next;
+    auto trans = k4a_transformation_create(&calibration);
     while (true) {
         auto start = std::chrono::high_resolution_clock::now();
-        cap >> frame;
-        if (frame.empty()) break; // фильм кончился
-        cvtColor(frame, current_frame, COLOR_BGR2GRAY);
-        current_frame = current_frame(roi).clone();
-        if (!current_frame.isContinuous()) {
-            cout << current_frame.type() << " - type\n";
-            current_frame = current_frame.reshape(1, current_frame.rows * current_frame.cols).clone();
-        }
-        if (!previous_frame.isContinuous()) {
-            cout << current_frame.type() << " - type\n";
-            previous_frame = previous_frame.reshape(1, previous_frame.rows * previous_frame.cols).clone();
-        }
-        next = split_frame(hsv_set, previous_frame, current_frame, previous, numRows, numCols);
-        if (next == Point(0, 0)) next = previous;
-        // рисуем круги граничных точек
-        auto result = std::chrono::high_resolution_clock::now();
-        double fps = 1.0 / ((double)(result - start).count() / 1e9);
-        if (argc >= 2 && argv[1][0] == 'O' && argv[1][1] == 'N') {
-            putText(frame, to_string(fps), cords[0], FONT_HERSHEY_PLAIN, 3, (100, 255, 0), 3, LINE_AA);
-            circle(frame, cords[0], 10, Scalar(255, 0, 255), 2, 3);
-            circle(frame, cords[1], 10, Scalar(255, 0, 255), 2, 3);
-            // рисуем точку касания
-            circle(frame, next + cords[0], 10, Scalar(0, 0, 255), 2, 3);
-            imshow("Example3", frame);
-        }
+        //cap >> frame;
+        frame = cv::Mat::zeros(ir_camera.resolution_height, ir_camera.resolution_width, CV_16U);
+        k4a_wait_result_t resulted = k4a_device_get_capture(device, &capture, K4A_WAIT_INFINITE);
+        if (resulted == K4A_WAIT_RESULT_SUCCEEDED) {
+            ir_image = k4a_capture_get_ir_image(capture);
+            frame.data = reinterpret_cast<uchar*>(k4a_image_get_buffer(ir_image));
+            // Process the frame here...
+            //frame.convertTo(frame, CV_8U, 255.0 / 65535.0);
+            cv::cvtColor(frame, frame, cv::COLOR_GRAY2BGR);
+            // переводим из бгр в отенки серого
+            cvtColor(frame, current_frame, COLOR_BGR2GRAY);
+            if (frame.empty()) break; // фильм кончился
+            current_frame = current_frame(roi).clone();
+            if (!current_frame.isContinuous()) {
+                cout << current_frame.type() << " - type\n";
+                current_frame = current_frame.reshape(1, current_frame.rows * current_frame.cols).clone();
+            }
+            if (!previous_frame.isContinuous()) {
+                cout << current_frame.type() << " - type\n";
+                previous_frame = previous_frame.reshape(1, previous_frame.rows * previous_frame.cols).clone();
+            }
+            next = split_frame(hsv_set, previous_frame, current_frame, previous, numRows, numCols);
+            if (next == Point(0, 0)) next = previous;
+            // рисуем круги граничных точек
+            auto result = std::chrono::high_resolution_clock::now();
+            double fps = 1.0 / ((double)(result - start).count() / 1e9);
+            if (argc >= 2 && argv[1][0] == 'O' && argv[1][1] == 'N') {
+                putText(frame, to_string(fps), cords[0], FONT_HERSHEY_PLAIN, 3, (255, 255, 255), 3, LINE_AA);
+                circle(frame, cords[0], 10, Scalar(255, 0, 255), 2, 3);
+                circle(frame, cords[1], 10, Scalar(255, 0, 255), 2, 3);
+            }
 
-        // нажимаем мышкой
-        //если прошло смещение больше чем на 5 пикселей
-        if (abs(next.x - previous.x) >= 5 || abs(next.y - previous.y) >= 5) {
-            Point screen = transform_cord(cords, Point(1920, 1080), next);
-            SetCursorPos(screen.x, screen.y);
-            // раскомментировать после калибровки
-            //mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTDOWN, screen.x, screen.y, 0, 0); // нажали
-            //mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTUP, screen.x, screen.y, 0, 0); //отпустили
-        }
-        previous = next;
-        current_frame.copyTo(previous_frame);
-        // нажата любая кнопка или эксейп(точно не помню) -> выход
-        if (waitKey(33) >= 0) {
-            break;
+            // нажимаем мышкой
+            //если прошло смещение больше чем на 5 пикселей
+            if (cnt_frame == 0 && next != previous) {
+                // рисуем точку касания
+                mega_frame = next;
+                Point screen = transform_cord(cords, Point(1920, 1080), next);
+                SetCursorPos(screen.x, screen.y);
+                //mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTDOWN, screen.x, screen.y, 0, 0); // нажали
+                //mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTUP, screen.x, screen.y, 0, 0); //отпустили
+                cnt_frame++;
+            }
+            else if (cnt_frame != 0) {
+                cnt_frame++;
+                if (cnt_frame == 10)
+                    cnt_frame = 0;
+            }
+            circle(frame, mega_frame + cords[0], 10, Scalar(0, 0, 255), 2, 3);
+            imshow("Example3", frame);
+            previous = next;
+            current_frame.copyTo(previous_frame);
+            // нажата любая кнопка или эксейп(точно не помню) -> выход
+            if (waitKey(33) >= 0) {
+                break;
+            }
+            k4a_image_release(ir_image);
+            k4a_capture_release(capture);
         }
     }
     save_vector(hsv_set, filename_hsv);
+    k4a_device_stop_cameras(device);
+    k4a_device_close(device);
     return 0;
 }
+
+
